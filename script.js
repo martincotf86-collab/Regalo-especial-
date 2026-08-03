@@ -45,6 +45,7 @@
 
   // Responsive canvas sizing
   function resizeCanvases() {
+    if (!starCanvas || !ambientCanvas) return;
     starCanvas.width = window.innerWidth;
     starCanvas.height = window.innerHeight;
     ambientCanvas.width = window.innerWidth;
@@ -58,7 +59,7 @@
     const ctx = starCanvas.getContext('2d');
     const w = starCanvas.width, h = starCanvas.height;
     const stars = [];
-    const count = Math.round((w*h)/50000); // density
+    const count = Math.max(20, Math.round((w*h)/50000)); // density
     for (let i=0;i<count;i++){
       stars.push({
         x: Math.random()*w,
@@ -85,6 +86,7 @@
 
   // ----- AMBIENT PARTICLES (sparkles/pollen) -----
   function startAmbientParticles() {
+    if (!ambientCanvas) return;
     const ctx = ambientCanvas.getContext('2d');
     const w = ambientCanvas.width, h = ambientCanvas.height;
     const particles = [];
@@ -122,7 +124,12 @@
   // ----- WEB AUDIO: ambient synthesis (wind, leaves, birds) -----
   function initAudio() {
     if (audioCtx) return;
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (e) {
+      console.warn('AudioContext unavailable', e);
+      return;
+    }
     ambientGain = audioCtx.createGain();
     ambientGain.gain.value = 0.0; // start silent, fade in
     ambientGain.connect(audioCtx.destination);
@@ -170,7 +177,7 @@
   }
 
   function fadeInAmbient() {
-    if (!ambientGain) return;
+    if (!ambientGain || !audioCtx) return;
     const now = audioCtx.currentTime;
     ambientGain.gain.cancelScheduledValues(now);
     ambientGain.gain.setValueAtTime(0, now);
@@ -264,8 +271,15 @@
     path.setAttribute('stroke-linecap','round');
     path.setAttribute('stroke-linejoin','round');
     path.setAttribute('stroke-width', thickness);
-    path.style.strokeDasharray = path.getTotalLength();
-    path.style.strokeDashoffset = path.getTotalLength();
+    try {
+      const len = path.getTotalLength();
+      path.style.strokeDasharray = len;
+      path.style.strokeDashoffset = len;
+    } catch (e) {
+      // fallback if not in DOM yet
+      path.style.strokeDasharray = '1000';
+      path.style.strokeDashoffset = '1000';
+    }
     path.style.transition = 'stroke-dashoffset 900ms linear';
     return path;
   }
@@ -397,4 +411,255 @@
     }
     // store base coords
     const tr = el.getAttribute('transform');
-    const m = tr.match(/translate\(([-\d.]+),([-
+    const m = tr.match(/translate\(([-\d.]+),([\-\d.]+)\)/);
+    if (m){ el.__x = parseFloat(m[1]); el.__y = parseFloat(m[2]); requestAnimationFrame(f);}    
+  }
+
+  function bloomFlowerEffect(g){
+    // quick sparkle and hearts
+    const ns = 'http://www.w3.org/2000/svg';
+    const p = document.createElementNS(ns,'g');
+    const rect = g.getBoundingClientRect();
+    for (let i=0;i<6;i++){
+      const heart = document.createElementNS(ns,'circle');
+      heart.setAttribute('r',2 + Math.random()*3);
+      heart.setAttribute('fill','#ff9fb1');
+      const rx = (Math.random()-0.5)*24;
+      const ry = -6 - Math.random()*24;
+      heart.setAttribute('transform',`translate(${rx},${ry})`);
+      p.appendChild(heart);
+      // animate each heart
+      heart.animate([
+        {transform:`translate(0,0)`, opacity:1},
+        {transform:`translate(${rx*2},${ry-30})`, opacity:0}
+      ],{duration:700 + Math.random()*400, easing:'ease-out', fill:'forwards'});
+    }
+    sparklesLayer.appendChild(p);
+    setTimeout(()=>p.remove(),1300);
+    // flower highlight
+    try{ g.animate([{filter:'brightness(1)'},{filter:'brightness(1.8)'}],{duration:380,fill:'forwards'});}catch(e){}
+  }
+
+  // create many flowers over time
+  async function growFlowers() {
+    // sample from larger branches (treePaths) - prefer longer paths
+    const pathPool = treePaths.slice().sort((a,b)=>b.getTotalLength()-a.getTotalLength());
+    let created = 0;
+    let attempts = 0;
+    while (created < MAX_FLOWERS && attempts < MAX_FLOWERS*3){
+      attempts++;
+      const p = pathPool[Math.floor(Math.random()*pathPool.length)];
+      if (!p) break;
+      const pt = p.getPointAtLength(p.getTotalLength() * (0.15 + Math.random()*0.75));
+      // small offset outward to sit on the branch
+      const jitterX = (Math.random()-0.5) * 6;
+      const jitterY = (Math.random()-0.5) * 6;
+      createFlower(pt.x + jitterX, pt.y + jitterY, Math.random()*800);
+      created++;
+      await wait(40 + Math.random()*120);
+    }
+  }
+
+  // ----- Heart formation: move flowers toward heart-shape targets -----
+  function heartPoints(count, box) {
+    // box: {xMin,xMax,yMin,yMax} in SVG coords
+    const pts = [];
+    for (let i=0;i<count;i++){
+      const u = -Math.PI + (2*Math.PI)*(i/count) + (Math.random()-0.5)*(2*Math.PI/count);
+      const x = 16*Math.pow(Math.sin(u),3);
+      const y = -(13*Math.cos(u) - 5*Math.cos(2*u) - 2*Math.cos(3*u) - Math.cos(4*u));
+      pts.push({x,y});
+    }
+    const xs = pts.map(p=>p.x), ys=pts.map(p=>p.y);
+    const minX = Math.min(...xs), maxX=Math.max(...xs);
+    const minY = Math.min(...ys), maxY=Math.max(...ys);
+    return pts.map((p,i)=>{
+      const nx = (p.x - minX) / (maxX - minX);
+      const ny = (p.y - minY) / (maxY - minY);
+      const rx = box.xMin + nx*(box.xMax - box.xMin);
+      const ry = box.yMin + ny*(box.yMax - box.yMin);
+      return {x:rx, y:ry};
+    });
+  }
+
+  async function formHeart() {
+    if (heartFormed) return;
+    heartFormed = true;
+    // compute heart box near upper-middle of tree
+    const box = {xMin:-160, xMax:160, yMin:-340, yMax:-100};
+    const targets = heartPoints(flowers.length, box);
+    // shuffle to avoid perfectness
+    shuffleArray(targets);
+    flowers.forEach((f, i) => {
+      const t = targets[i % targets.length];
+      const el = f.el;
+      el.style.transition = `transform ${1800 + Math.random()*900}ms cubic-bezier(.16,1,.3,1)`;
+      f.locked = true;
+      el.setAttribute('transform', `translate(${t.x},${t.y}) scale(1)`);
+    });
+    await wait(2200);
+    counterCard.classList.remove('hidden');
+    letterCard.classList.remove('hidden');
+    await wait(6000);
+    finalPhrase.classList.add('show');
+  }
+
+  // ----- Interactions on tree (click) and heart (click) -----
+  function attachTreeInteraction() {
+    const world = document.querySelector('.world-svg');
+    world.addEventListener('pointerdown', (e)=>{
+      treePaths.forEach((p,i)=>{
+        try{ p.animate([
+          {transform:'translateY(0px)'},
+          {transform:`translateY(${(Math.random()-0.5)*6}px)`}
+        ], {duration:400, iterations:1, easing:'ease-out'});}catch(e){}
+      });
+    });
+  }
+
+  function attachHeartTap() {
+    const world = document.querySelector('.world-svg');
+    world.addEventListener('dblclick', (e)=>{
+      if (!heartFormed) return;
+      createPetalRain(80);
+    });
+  }
+
+  // create petal elements falling
+  function createPetal(x=0,y=0, count=1){
+    const ns = 'http://www.w3.org/2000/svg';
+    for (let i=0;i<count;i++){
+      const p = document.createElementNS(ns,'path');
+      p.setAttribute('d','M0 0 C2 8 8 8 10 0 C8 -1 2 -1 0 0 Z');
+      p.setAttribute('fill','#ffd07a');
+      p.setAttribute('transform',`translate(${x + (Math.random()*40-20)},${y + (Math.random()*40-20)}) rotate(${Math.random()*360}) scale(${0.7+Math.random()*0.8})`);
+      p.style.opacity = 0.95;
+      petalsLayer.appendChild(p);
+      const fall = [
+        {transform:p.getAttribute('transform'), opacity:1},
+        {transform:`translate(${x + (Math.random()*400-200)}, ${800 + Math.random()*200}) rotate(${Math.random()*400}) scale(${0.5})`, opacity:0.2}
+      ];
+      const dur = 3000 + Math.random()*2500;
+      try{ p.animate(fall, {duration:dur, easing:'cubic-bezier(.2,.8,.2,1)', fill:'forwards'});}catch(e){}
+      setTimeout(()=>p.remove(), dur + 200);
+    }
+  }
+
+  function createPetalRain(num=50){
+    for (let i=0;i<num;i++){
+      setTimeout(()=>createPetal(500, -50, 1), i*30 + Math.random()*300);
+    }
+  }
+
+  // ----- Counter (months/days/h/m/s) -----
+  function updateCounter() {
+    const now = new Date();
+    let start = new Date(relationshipStart.getTime());
+    let months = (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth());
+    const adjusted = new Date(start.getTime());
+    adjusted.setMonth(start.getMonth() + months);
+    if (now < adjusted) { months--; adjusted.setMonth(start.getMonth() + months); }
+    const diffMs = now - adjusted;
+    let remaining = diffMs;
+    const days = Math.floor(remaining / (1000*60*60*24));
+    remaining -= days*(1000*60*60*24);
+    const hours = Math.floor(remaining / (1000*60*60));
+    remaining -= hours*(1000*60*60);
+    const minutes = Math.floor(remaining / (1000*60));
+    remaining -= minutes*(1000*60);
+    const seconds = Math.floor(remaining / 1000);
+
+    counterEls.months.textContent = months;
+    counterEls.days.textContent = days;
+    counterEls.hours.textContent = hours;
+    counterEls.minutes.textContent = minutes;
+    counterEls.seconds.textContent = seconds;
+  }
+
+  // ----- Letter (typewriter effect) -----
+  let letterText = "Flores amarillas para el amor de mi vida...\n\nCada amanecer junto a vos hace que el mundo sea más tierno, más brillante y lleno de promesas. Gracias por ser mi lugar seguro y mi aventura favorita.";
+  async function showLetter() {
+    letterEl.textContent = '';
+    letterCard.classList.remove('hidden');
+    await typeWriter(letterEl, letterText, 28);
+  }
+
+  editLetterBtn.addEventListener('click', ()=>{
+    const v = prompt('Editar carta:', letterText);
+    if (v !== null) { letterText = v; showLetter(); }
+  });
+
+  // ----- Orchestration -----
+  enterBtn.addEventListener('click', async (e) => {
+    enterBtn.animate([{transform:'scale(1)'},{transform:'scale(.92)'}],{duration:180,fill:'forwards'});
+    await wait(180);
+    intro.classList.remove('active');
+    intro.style.transition = 'opacity .9s ease';
+    intro.style.opacity = 0;
+    stage.classList.add('active');
+    stage.setAttribute('aria-hidden','false');
+
+    initAudio();
+    await wait(700);
+    fadeInAmbient();
+    startAmbientParticles();
+    await wait(1000);
+    await dawnSequence();
+    await drawTree();
+    await growFlowers();
+    await wait(900);
+    await formHeart();
+    await showLetter();
+    counterCard.classList.remove('hidden');
+    setInterval(updateCounter, 1000);
+    updateCounter();
+
+    attachTreeInteraction();
+    attachHeartTap();
+  }, {once:true});
+
+  // Utility helpers
+  function wait(ms){return new Promise(res=>setTimeout(res,ms));}
+  function hexToRgb(hex) {
+    hex = hex.replace('#','');
+    if (hex.length===3) hex = hex.split('').map(h=>h+h).join('');
+    const r = parseInt(hex.substring(0,2),16);
+    const g = parseInt(hex.substring(2,4),16);
+    const b = parseInt(hex.substring(4,6),16);
+    return {r,g,b};
+  }
+  function easeInOutCubic(t){ return t<0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2; }
+  function shuffleArray(a){ for (let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+
+  // typewriter
+  async function typeWriter(el, text, cps=40){
+    el.textContent = '';
+    for (let i=0;i<text.length;i++){
+      el.textContent += text[i];
+      await wait(1000 / cps + Math.random()*10);
+    }
+  }
+
+  // minimal startup
+  function init(){
+    initStarfield();
+    resizeCanvases();
+  }
+
+  init();
+
+  // Accessibility: allow Enter key on button
+  enterBtn.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') enterBtn.click(); });
+
+  document.addEventListener('touchstart', ()=>{}, {passive:true});
+
+  // Expose some functions for debugging from console
+  window._scene = {
+    formHeart: formHeart,
+    createPetalRain,
+    createFlower,
+    flowers,
+    treePaths
+  };
+
+})();
